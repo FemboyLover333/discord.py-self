@@ -53,8 +53,9 @@ from collections import deque
 import datetime
 
 import aiohttp
+import traceback
 
-from .enums import NetworkConnectionType, RelationshipAction, InviteType
+from .enums import RelationshipAction, InviteType
 from .errors import (
     HTTPException,
     RateLimited,
@@ -130,7 +131,6 @@ if TYPE_CHECKING:
 
 INTERNAL_API_VERSION = 9
 CIPHERS = (
-    'TLS_GREASE_5A',
     'TLS_AES_128_GCM_SHA256',
     'TLS_AES_256_GCM_SHA384',
     'TLS_CHACHA20_POLY1305_SHA256',
@@ -147,6 +147,7 @@ CIPHERS = (
     'AES128-SHA',
     'AES256-SHA',
 )
+#{"hash":"da261e9a9bceeaf6ed4c2dad3d0067ce","fingerprint":"771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,11-13-17513-10-5-27-43-23-45-18-35-65281-16-65037-0-51-21,29-23-24,0","ciphers":"TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384,TLS_CHACHA20_POLY1305_SHA256,ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-CHACHA20-POLY1305,ECDHE-RSA-CHACHA20-POLY1305,ECDHE-RSA-AES128-SHA,ECDHE-RSA-AES256-SHA,AES128-GCM-SHA256,AES256-GCM-SHA384,AES128-SHA,AES256-SHA","curves":"001D:0017:0018","protocol":"TLSv1.3","user_agent":"Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9054 Chrome/124.0.6367.243 Electron/30.2.0 Safari/537.36"}
 
 _log = logging.getLogger(__name__)
 
@@ -239,7 +240,6 @@ def handle_message_parameters(
     previous_allowed_mentions: Optional[AllowedMentions] = None,
     mention_author: Optional[bool] = None,
     thread_name: str = MISSING,
-    network_type: NetworkConnectionType = MISSING,
     channel_payload: Dict[str, Any] = MISSING,
 ) -> MultipartParameters:
     if files is not MISSING and file is not MISSING:
@@ -295,9 +295,6 @@ def handle_message_parameters(
 
     if thread_name is not MISSING:
         payload['thread_name'] = thread_name
-
-    if network_type is not MISSING:
-        payload['mobile_network_type'] = str(network_type)
 
     if allowed_mentions:
         if previous_allowed_mentions is not None:
@@ -575,6 +572,7 @@ class HTTPClient:
         self,
         connector: Optional[aiohttp.BaseConnector] = None,
         *,
+        super_properties:Optional[dict] = {},
         proxy: Optional[str] = None,
         proxy_auth: Optional[aiohttp.BasicAuth] = None,
         unsync_clock: bool = True,
@@ -605,7 +603,8 @@ class HTTPClient:
         self.max_ratelimit_timeout: Optional[float] = max(30.0, max_ratelimit_timeout) if max_ratelimit_timeout else None
         self.get_locale: Callable[[], str] = locale
 
-        self.super_properties: Dict[str, Any] = {}
+        self.overwrite_super_properties: Dict[str, Any] = super_properties
+        self.super_properties: Dict[str, Any] = MISSING
         self.encoded_super_properties: str = MISSING
         self._started: bool = False
 
@@ -635,8 +634,8 @@ class HTTPClient:
                 connector=self.connector, trace_configs=None if self.http_trace is None else [self.http_trace]
             )
         )
-        self.super_properties, self.encoded_super_properties = sp, _ = await utils._get_info(session)
-        _log.info('Found user agent %s, build number %s.', sp.get('browser_user_agent'), sp.get('client_build_number'))
+        self.super_properties, self.encoded_super_properties = sp, _ = await utils._get_info(session, self.overwrite_super_properties)
+        #_log.info('Found user agent %s, build number %s.', sp.get('browser_user_agent'), sp.get('client_build_number'))
 
         self._started = True
 
@@ -713,26 +712,25 @@ class HTTPClient:
 
         # Header creation
         headers = {
-            'Accept-Language': 'en-US',
+            'Accept': '*/*',
+            'Accept-Language': 'ja,en-US;q=0.9',
             'Cache-Control': 'no-cache',
+            "Cookie": "locale=en-GB;",
             'Connection': 'keep-alive',
             'Origin': 'https://discord.com',
             'Pragma': 'no-cache',
             'Referer': 'https://discord.com/channels/@me',
-            'Sec-CH-UA': '"Google Chrome";v="{0}", "Chromium";v="{0}", ";Not-A.Brand";v="24"'.format(
-                self.browser_version.split('.')[0]
-            ),
+            'Sec-CH-UA': '"Not_A Brand";v="8", "Chromium";v="120"',
             'Sec-CH-UA-Mobile': '?0',
             'Sec-CH-UA-Platform': '"Windows"',
             'Sec-Fetch-Dest': 'empty',
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
             'User-Agent': self.user_agent,
-            'X-Discord-Locale': self.get_locale(),
+            'X-Discord-Locale': "en-GB",
             'X-Debug-Options': 'bugReporterEnabled',
             'X-Super-Properties': self.encoded_super_properties,
         }
-
         # This header isn't really necessary
         # Timezones are annoying, so if it errors, we don't care
         try:
@@ -821,7 +819,7 @@ class HTTPClient:
                                     # It is unavoidable.
                                     fmt = 'A route (%s) has changed hashes: %s -> %s.'
                                     _log.debug(fmt, route_key, bucket_hash, discord_hash)
-
+    
                                     self._bucket_hashes[route_key] = discord_hash
                                     recalculated_key = discord_hash + route.major_parameters
                                     self._buckets[recalculated_key] = ratelimit
@@ -831,7 +829,7 @@ class HTTPClient:
                                     _log.debug(fmt, route_key, discord_hash)
                                     self._bucket_hashes[route_key] = discord_hash
                                     self._buckets[discord_hash + route.major_parameters] = ratelimit
-
+    
                         if has_ratelimit_headers:
                             if response.status != 429:
                                 ratelimit.update(response, use_clock=self.use_clock)
@@ -840,7 +838,7 @@ class HTTPClient:
                                         'A rate limit bucket (%s) has been exhausted. Pre-emptively rate limiting...',
                                         discord_hash or route_key,
                                     )
-
+    
                         # 202s must be retried
                         if response.status == 202 and isinstance(data, dict) and data['code'] == 110000:
                             # We update the `attempts` query parameter
@@ -849,78 +847,79 @@ class HTTPClient:
                                 kwargs['params'] = {'attempts': 1}
                             else:
                                 params['attempts'] = (params.get('attempts') or 0) + 1
-
+    
                             # Sometimes retry_after is 0, but that's undesirable
                             retry_after: float = data['retry_after'] or 5
                             _log.debug('%s %s received a 202. Retrying in %s seconds...', method, url, retry_after)
                             await asyncio.sleep(retry_after)
                             continue
-
+    
                         # Request was successful so just return the text/json
                         if 300 > response.status >= 200:
                             _log.debug('%s %s has received %s.', method, url, data)
                             return data
-
+    
                         # Rate limited
                         if response.status == 429:
                             if not response.headers.get('Via') or isinstance(data, str):
                                 # Banned by Cloudflare more than likely.
                                 raise HTTPException(response, data)
-
+    
                             if ratelimit.remaining > 0:
                                 # According to night
                                 # https://github.com/discord/discord-api-docs/issues/2190#issuecomment-816363129
                                 # Remaining > 0 and 429 means that a sub ratelimit was hit.
                                 # It is unclear what should happen in these cases other than just using the retry_after
                                 # value in the body.
-                                _log.debug(
-                                    '%s %s received a 429 despite having %s remaining requests. This is a sub-ratelimit.',
-                                    method,
-                                    url,
-                                    ratelimit.remaining,
-                                )
-
+                                #_log.debug(
+                                #    '%s %s received a 429 despite having %s remaining requests. This is a sub-ratelimit.',
+                                #    method,
+                                #    url,
+                                #    ratelimit.remaining,
+                                #)
+                                pass
+    
                             retry_after: float = data['retry_after']
                             if self.max_ratelimit_timeout and retry_after > self.max_ratelimit_timeout:
-                                _log.warning(
-                                    'We are being rate limited. %s %s responded with 429. Timeout of %.2f was too long, erroring instead.',
-                                    method,
-                                    url,
-                                    retry_after,
-                                )
+                                #_log.warning(
+                                #    'We are being rate limited. %s %s responded with 429. Timeout of %.2f was too long, erroring instead.',
+                                #    method,
+                                #    url,
+                                #    retry_after,
+                                #)
                                 raise RateLimited(retry_after)
-
-                            fmt = 'We are being rate limited. %s %s responded with 429. Retrying in %.2f seconds.'
-                            _log.warning(fmt, method, url, retry_after)
-
-                            _log.debug(
-                                'Rate limit is being handled by bucket hash %s with %r major parameters.',
-                                bucket_hash,
-                                route.major_parameters,
-                            )
-
+    
+                            #fmt = 'We are being rate limited. %s %s responded with 429. Retrying in %.2f seconds.'
+                            #_log.warning(fmt, method, url, retry_after)
+    
+                            #_log.debug(
+                            #    'Rate limit is being handled by bucket hash %s with %r major parameters.',
+                            #    bucket_hash,
+                            #    route.major_parameters,
+                            #)
+    
                             # Check if it's a global rate limit
                             is_global = data.get('global', False)
                             if is_global:
                                 _log.warning('Global rate limit has been hit. Retrying in %.2f seconds.', retry_after)
                                 self._global_over.clear()
-
+    
                             await asyncio.sleep(retry_after)
                             _log.debug('Done sleeping for the rate limit. Retrying...')
-
+    
                             # Release the global lock now that the rate limit passed
                             if is_global:
                                 self._global_over.set()
                                 _log.debug('Global rate limit is now over.')
-
+    
                             continue
-
+    
                         # Unconditional retry
                         if response.status in {500, 502, 504, 507, 522, 523, 524}:
                             failed += 1
                             await asyncio.sleep(1 + tries * 2)
                             continue
-
+    
                         # Usual error cases
                         if response.status == 403:
                             raise Forbidden(response, data)
@@ -2301,7 +2300,9 @@ class HTTPClient:
                 channel_type=getattr(message.channel, 'type', None),
                 message_id=message.id,
             )
-        elif type is InviteType.guild or type is InviteType.group_dm:  # Join Guild, Accept Invite Page
+        elif type is InviteType.guild: # Join Guild
+            props = ContextProperties.from_join_guild(guild_id=guild_id, channel_id=channel_id, channel_type=channel_type)
+        elif type is InviteType.group_dm:  # Accept Invite Page
             props = choice(
                 (
                     ContextProperties.from_accept_invite_page,
@@ -2315,7 +2316,7 @@ class HTTPClient:
         payload = {}
         if session_id is not None:
             payload['session_id'] = session_id
-
+            
         return self.request(
             Route('POST', '/invites/{invite_id}', invite_id=invite_id), context_properties=props, json=payload
         )
@@ -3090,7 +3091,7 @@ class HTTPClient:
         payment_source_id: Optional[Snowflake] = None,
         localize: bool = True,
         with_bundled_skus: bool = True,
-    ) -> Response[List[store.PrivateSKU]]:
+    ) -> Response[List[store.SKU]]:
         params = {}
         if country_code:
             params['country_code'] = country_code
@@ -3105,7 +3106,7 @@ class HTTPClient:
             Route('GET', '/applications/{app_id}/skus', app_id=app_id), params=params, super_properties_to_track=True
         )
 
-    def create_sku(self, payload: dict) -> Response[store.PrivateSKU]:
+    def create_sku(self, payload: dict) -> Response[store.SKU]:
         return self.request(Route('POST', '/store/skus'), json=payload, super_properties_to_track=True)
 
     def get_app_discoverability(self, app_id: Snowflake) -> Response[application.ApplicationDiscoverability]:
@@ -3507,7 +3508,7 @@ class HTTPClient:
         country_code: Optional[str] = None,
         payment_source_id: Optional[Snowflake] = None,
         localize: bool = True,
-    ) -> Response[store.PrivateStoreListing]:
+    ) -> Response[store.StoreListing]:
         params = {}
         if country_code:
             params['country_code'] = country_code
@@ -3516,7 +3517,7 @@ class HTTPClient:
         if not localize:
             params['localize'] = 'false'
 
-        return self.request(Route('GET', '/store/listings/{listing_id}', listing_id=listing_id), params=params)
+        return self.request(Route('GET', '/store/listings/{listing_id}', app_id=listing_id), params=params)
 
     def get_store_listing_by_sku(
         self,
@@ -3525,7 +3526,7 @@ class HTTPClient:
         country_code: Optional[str] = None,
         payment_source_id: Optional[Snowflake] = None,
         localize: bool = True,
-    ) -> Response[store.PublicStoreListing]:
+    ) -> Response[store.StoreListing]:
         params = {}
         if country_code:
             params['country_code'] = country_code
@@ -3543,7 +3544,7 @@ class HTTPClient:
         country_code: Optional[str] = None,
         payment_source_id: Optional[int] = None,
         localize: bool = True,
-    ) -> Response[List[store.PrivateStoreListing]]:
+    ) -> Response[List[store.StoreListing]]:
         params = {}
         if country_code:
             params['country_code'] = country_code
@@ -3603,7 +3604,7 @@ class HTTPClient:
         country_code: Optional[str] = None,
         payment_source_id: Optional[int] = None,
         localize: bool = True,
-    ) -> Response[List[store.PublicStoreListing]]:
+    ) -> Response[List[store.StoreListing]]:
         params = {'application_id': app_id}
         if country_code:
             params['country_code'] = country_code
@@ -3621,7 +3622,7 @@ class HTTPClient:
         country_code: Optional[str] = None,
         payment_source_id: Optional[int] = None,
         localize: bool = True,
-    ) -> Response[store.PublicStoreListing]:
+    ) -> Response[store.StoreListing]:
         params = {}
         if country_code:
             params['country_code'] = country_code
@@ -3641,7 +3642,7 @@ class HTTPClient:
         country_code: Optional[str] = None,
         payment_source_id: Optional[Snowflake] = None,
         localize: bool = True,
-    ) -> Response[List[store.PublicStoreListing]]:
+    ) -> Response[List[store.StoreListing]]:
         params: Dict[str, Any] = {'application_ids': app_ids}
         if country_code:
             params['country_code'] = country_code
@@ -3654,14 +3655,14 @@ class HTTPClient:
 
     def create_store_listing(
         self, application_id: Snowflake, sku_id: Snowflake, payload: dict
-    ) -> Response[store.PrivateStoreListing]:
+    ) -> Response[store.StoreListing]:
         return self.request(
             Route('POST', '/store/listings'),
             json={**payload, 'application_id': application_id, 'sku_id': sku_id},
             super_properties_to_track=True,
         )
 
-    def edit_store_listing(self, listing_id: Snowflake, payload: dict) -> Response[store.PrivateStoreListing]:
+    def edit_store_listing(self, listing_id: Snowflake, payload: dict) -> Response[store.StoreListing]:
         return self.request(
             Route('PATCH', '/store/listings/{listing_id}', listing_id=listing_id),
             json=payload,
@@ -3675,7 +3676,7 @@ class HTTPClient:
         country_code: Optional[str] = None,
         payment_source_id: Optional[Snowflake] = None,
         localize: bool = True,
-    ) -> Response[store.PrivateSKU]:
+    ) -> Response[store.SKU]:
         params = {}
         if country_code:
             params['country_code'] = country_code
@@ -3686,7 +3687,7 @@ class HTTPClient:
 
         return self.request(Route('GET', '/store/skus/{sku_id}', sku_id=sku_id), params=params)
 
-    def edit_sku(self, sku_id: Snowflake, payload: dict) -> Response[store.PrivateSKU]:
+    def edit_sku(self, sku_id: Snowflake, payload: dict) -> Response[store.SKU]:
         return self.request(
             Route('PATCH', '/store/skus/{sku_id}', sku_id=sku_id), json=payload, super_properties_to_track=True
         )
@@ -4341,12 +4342,6 @@ class HTTPClient:
     def get_user(self, user_id: Snowflake) -> Response[user.APIUser]:
         return self.request(Route('GET', '/users/{user_id}', user_id=user_id))
 
-    def get_user_named(self, username: str, dicriminator: Optional[str] = None) -> Response[user.APIUser]:
-        params = {}
-        if dicriminator:
-            params['discriminator'] = dicriminator
-        return self.request(Route('GET', '/users/username/{username}', username=username), params=params)
-
     def get_user_profile(
         self,
         user_id: Snowflake,
@@ -4456,15 +4451,6 @@ class HTTPClient:
         return self.request(
             Route('GET', '/channels/{channel_id}/application-commands/search', channel_id=channel_id), params=params
         )
-
-    def guild_application_command_index(self, guild_id: Snowflake) -> Response[command.GuildApplicationCommandIndex]:
-        return self.request(Route('GET', '/guilds/{guild_id}/application-command-index', guild_id=guild_id))
-
-    def channel_application_command_index(self, channel_id: Snowflake) -> Response[command.ApplicationCommandIndex]:
-        return self.request(Route('GET', '/channels/{channel_id}/application-command-index', channel_id=channel_id))
-
-    def user_application_command_index(self) -> Response[command.ApplicationCommandIndex]:
-        return self.request(Route('GET', '/users/@me/application-command-index'))
 
     def interact(
         self,
